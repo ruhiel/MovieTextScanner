@@ -1,24 +1,85 @@
 ﻿using CommandLine;
+using Spectre.Console;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using System.Drawing;
+using System.Threading;
 
 namespace MovieTextScanner
 {
     internal class Program
     {
+        static int Main(string[] args)
+        {
+            var parseResult = Parser.Default.ParseArguments<Options>(args);
+            switch (parseResult.Tag)
+            {
+                // パース成功
+                case ParserResultType.Parsed:
+                    var parsed = parseResult as Parsed<Options>;
+                    var opt = parsed.Value;
+                    Console.WriteLine($"検索対象：{opt.InputPath}");
+                    Console.WriteLine($"検索文字列：{opt.SearchText}");
+                    Proc(opt);
+                    return 0;
+
+                // パース失敗
+                case ParserResultType.NotParsed:
+                    var notParsed = (NotParsed<Options>)parseResult;
+
+                    foreach (var error in notParsed.Errors)
+                    {
+                        Console.Error.WriteLine(error);
+                    }
+
+                    return 1;
+
+                default:
+                    return 1;
+            }
+
+        }
+        static double GetDuration(string path)
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "ffprobe.exe",
+                Arguments =
+                    $"-v error -show_entries format=duration " +
+                    "-of default=noprint_wrappers=1:nokey=1 " +
+                    $"\"{path}\"",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true
+            };
+
+            using (var process = Process.Start(psi))
+            {
+                var output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit();
+
+                return double.Parse(output, System.Globalization.CultureInfo.InvariantCulture);
+            }
+        }
         static void Proc(Options opt)
         {
             var sw = Stopwatch.StartNew();
 
             var inputFile = opt.InputPath;
             var temp1 = new TempDirectory();
+            var temp2 = new TempDirectory();
+            var temp3 = new TempDirectory();
             var outputPattern = Path.Combine(temp1.GetTempDir(), "frame_%04d.jpg");
+
+            // 動画の長さ（秒）
+            var duration = GetDuration(inputFile);
+
+            var totalFrames = (int)Math.Ceiling(duration / opt.Interval);
 
             var psi = new ProcessStartInfo
             {
@@ -27,52 +88,142 @@ namespace MovieTextScanner
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+            AnsiConsole.Progress()
+                .AutoClear(false)
+                .HideCompleted(false)
+                .Columns(
+                    new TaskDescriptionColumn(),
+                    new ProgressBarColumn(),
+                    new PercentageColumn(),
+                    new RemainingTimeColumn(),
+                    new SpinnerColumn())
+                .Start(ctx =>
+                {
+                    //
+                    // 画像抽出
+                    //
+                    var extractTask = ctx.AddTask("画像抽出中", maxValue: totalFrames);
 
-            var process = Process.Start(psi);
-            process.WaitForExit();
+                    using (var process1 = Process.Start(psi))
+                    {
+                        var current = 0;
 
-            var temp3 = new TempDirectory();
+                        while (!process1.HasExited)
+                        {
+                            var count = Directory.GetFiles(temp1.GetTempDir(), "*.jpg").Length;
 
-            string inputDir = temp1.GetTempDir();
-            string outputDir = temp3.GetTempDir();
+                            if (count > current)
+                            {
+                                extractTask.Increment(count - current);
+                                current = count;
+                            }
 
-            Directory.CreateDirectory(outputDir);
+                            Thread.Sleep(500);
+                        }
 
-            foreach (var path in Directory.GetFiles(inputDir))
-            {
-                var src = new Bitmap(path);
+                        var finalCount = Directory.GetFiles(temp1.GetTempDir(), "*.jpg").Length;
 
-                var cropWidth = src.Width / 3;
+                        if (finalCount > current)
+                        {
+                            extractTask.Increment(finalCount - current);
+                        }
 
-                // 右1/3の領域
-                var rect = new Rectangle(
-                    src.Width - cropWidth,
-                    0,
-                    cropWidth,
-                    src.Height);
+                        process1.WaitForExit();
+                        extractTask.Value = extractTask.MaxValue;
+                    }
 
-                var cropped = src.Clone(rect, src.PixelFormat);
+                    //
+                    // 画像切り抜き
+                    //
+                    var inputDir = temp1.GetTempDir();
+                    var outputDir = temp2.GetTempDir();
 
-                var outputPath = Path.Combine(outputDir, Path.GetFileName(path));
-                cropped.Save(outputPath);
-            }
+                    Directory.CreateDirectory(outputDir);
 
-            var temp2 = new TempDirectory();
+                    var files = Directory.GetFiles(inputDir);
 
-            var psi2 = new ProcessStartInfo
-            {
-                FileName = "yomitoku",
-                Arguments = $"{temp3.GetTempDir()} --lite -o {temp2.GetTempDir()} -f json",
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
+                    var cropTask = ctx.AddTask("画像切り抜き", maxValue: files.Length);
 
-            process = Process.Start(psi2);
-            process.WaitForExit();
+                    foreach (var path in files)
+                    {
+                        cropTask.Description =
+                            "切り抜き中: " + Path.GetFileName(path);
+
+                        using (var src = new Bitmap(path))
+                        {
+                            var cropWidth = src.Width / 3;
+
+                            var rect = new Rectangle(
+                                src.Width - cropWidth,
+                                0,
+                                cropWidth,
+                                src.Height);
+
+                            using (var cropped = src.Clone(rect, src.PixelFormat))
+                            {
+                                var outputPath =
+                                    Path.Combine(outputDir, Path.GetFileName(path));
+
+                                cropped.Save(outputPath);
+                            }
+                        }
+
+                        cropTask.Increment(1);
+                    }
+
+                    //
+                    // OCR
+                    //
+                    var psi2 = new ProcessStartInfo
+                    {
+                        FileName = "yomitoku",
+                        Arguments = temp2.GetTempDir() +
+                                    " --lite -o " +
+                                    temp3.GetTempDir() +
+                                    " -f json",
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+
+                    var totalFiles = files.Length;
+
+                    var ocrTask = ctx.AddTask("OCR中", maxValue: totalFiles);
+
+                    using (var process2 = Process.Start(psi2))
+                    {
+                        var current = 0;
+
+                        while (!process2.HasExited)
+                        {
+                            var count = Directory.GetFiles(
+                                temp3.GetTempDir(),
+                                "*.json").Length;
+
+                            if (count > current)
+                            {
+                                ocrTask.Increment(count - current);
+                                current = count;
+                            }
+
+                            Thread.Sleep(500);
+                        }
+
+                        var finalCount = Directory.GetFiles(
+                            temp3.GetTempDir(),
+                            "*.json").Length;
+
+                        if (finalCount > current)
+                        {
+                            ocrTask.Increment(finalCount - current);
+                        }
+
+                        process2.WaitForExit();
+                    }
+            });
 
             var jsonList = new List<JsonFile>();
 
-            foreach (var path in Directory.GetFiles(temp2.GetTempDir(), "*.json"))
+            foreach (var path in Directory.GetFiles(temp3.GetTempDir(), "*.json"))
             {
                 using (var stream = File.OpenRead(path))
                 {
@@ -117,27 +268,7 @@ namespace MovieTextScanner
 
         }
 
-        static void Main(string[] args)
-        {
-            var parseResult = Parser.Default.ParseArguments<Options>(args);
-            switch (parseResult.Tag)
-            {
-                // パース成功
-                case ParserResultType.Parsed:
-                    var parsed = parseResult as Parsed<Options>;
-                    Options opt = parsed.Value;
-                    Proc(opt);
-                    break;
 
-                // パース失敗
-                case ParserResultType.NotParsed:
-                    // パースの成否でパース結果のオブジェクトの方が変わる
-                    var notParsed = parseResult as NotParsed<Options>;
-
-                    break;
-            }
-
-        }
 
     }
 }
