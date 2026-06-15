@@ -1,4 +1,4 @@
-# Movie Text Search
+# Movie Text Scanner
 
 動画内の特定の文字列を検索するツールです。
 
@@ -61,13 +61,13 @@ git clone <repository>
 ## 使い方
 
 ```bash
-MovieTextSearch.exe -i movie.mp4 -s "検索文字列"
+MovieTextScanner.exe -i movie.mp4 -s "検索文字列"
 ```
 
 例
 
 ```bash
-MovieTextSearch.exe -i sample.mp4 -s "CM"
+MovieTextScanner.exe -i sample.mp4 -s "CM"
 ```
 
 ---
@@ -83,7 +83,7 @@ MovieTextSearch.exe -i sample.mp4 -s "CM"
 例
 
 ```bash
-MovieTextSearch.exe ^
+MovieTextScanner.exe ^
     -i sample.mp4 ^
     -s "提供" ^
     -n 10
