@@ -92,6 +92,7 @@ namespace MovieTextScanner
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+            List<string> searchList = null;
             AnsiConsole.Progress()
                 .AutoClear(false)
                 .HideCompleted(false)
@@ -108,9 +109,25 @@ namespace MovieTextScanner
                     CropImages(ctx, temp1, temp2);
 
                     RunOcr(ctx, temp1, temp2, temp3);
+
+                    searchList = SearchList(ctx, opt, temp3);
                 });
 
+            searchList.ForEach(x => Console.WriteLine(x));
+
+            sw.Stop();
+
+            Console.WriteLine($"実行時間：{sw.Elapsed.ToString(@"h\:mm\:ss")}");
+
+            Console.WriteLine("完了");
+
+        }
+
+        private static List<string> SearchList(ProgressContext ctx, Options opt, TempDirectory temp3)
+        {
             var jsonList = new List<JsonFile>();
+
+            var searchList = new List<string>();
 
             foreach (var path in Directory.GetFiles(temp3.GetTempDir(), "*.json"))
             {
@@ -125,6 +142,8 @@ namespace MovieTextScanner
                     }
                 }
             }
+
+            var searchTask = ctx.AddTask("検索中", maxValue: jsonList.Count);
 
             foreach (var json in jsonList)
             {
@@ -145,16 +164,13 @@ namespace MovieTextScanner
 
                         var result = time.ToString(@"h\:mm\:ss");
 
-                        Console.WriteLine($"{result} {first.Content}");
+                        searchList.Add($"{result} {first.Content}");
                     }
                 }
+                searchTask.Increment(1);
             }
-            sw.Stop();
 
-            Console.WriteLine($"実行時間：{sw.Elapsed.ToString(@"h\:mm\:ss")}");
-
-            Console.WriteLine("完了");
-
+            return searchList;
         }
 
         private static void RunOcr(ProgressContext ctx, TempDirectory temp1, TempDirectory temp2, TempDirectory temp3)
